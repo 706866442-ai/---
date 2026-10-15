@@ -36,3 +36,7 @@
 - [所需实物数据清单](workspace-snapshot/line_follower/docs/03_所需实物数据清单.md)
 
 根目录接线主表仍为当前实物记录；本次 C 盘的软件配置说明保存在对应快照接线表中，未改变实际接线。
+
+## 编码器双路原始计数显示
+
+C 盘快照中的 `gray_i2c_probe/encoder_probe` 已增加 PA2 串口输出：每 100 ms 提供 E1/E2 累计计数、增量、无效跳变及 A/B 电平。此探针已编译，尚未烧录；须先核对编码器供电和 3.3 V 逻辑电平。详情见 [探针说明](workspace-snapshot/gray_i2c_probe/编码器测试说明.md)。

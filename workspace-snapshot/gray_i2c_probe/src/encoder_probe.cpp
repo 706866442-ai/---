@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstdio>
 #include "EncoderTransition.h"
 
 // Confirmed by user, 2026-10-13. E1/E2 are not yet assigned left/right.
@@ -7,6 +8,7 @@ constexpr pin_size_t E1_B = PB14;
 constexpr pin_size_t E2_A = PB15;
 constexpr pin_size_t E2_B = PA8;
 constexpr pin_size_t USER_LED = PA4;
+Uart debugPort(PA3, PA2); // Optional 3.3 V USB-TTL monitor: TX on PA2.
 
 volatile uint32_t counts[2] = {0, 0};
 volatile uint32_t invalidTransitions[2] = {0, 0};
@@ -66,6 +68,8 @@ void setup() {
     // before confirming the physical wiring and logic supply.
     outputLow(PB12);
     for (pin_size_t pin : {PA0, PA1, PB6, PB7, PB8, PB9}) outputLow(pin);
+    debugPort.begin(115200);
+    debugPort.println("E,ms,e1_raw,e2_raw,e1_delta,e2_delta,e1_invalid,e2_invalid,e1_ab,e2_ab");
     pinMode(USER_LED, OUTPUT);
     digitalWrite(USER_LED, HIGH);
     // No internal pull-ups: encoder output circuitry/power is not yet known.
@@ -83,6 +87,7 @@ void setup() {
 void loop() {
     static uint32_t lastUs = micros();
     static uint32_t previousCounts[2] = {0, 0};
+    static uint32_t lastPrintedMs = 0;
     const uint32_t nowUs = micros();
     const uint32_t elapsed = nowUs - lastUs;
     if (elapsed >= 20000u) {
@@ -113,6 +118,23 @@ void loop() {
         previousCounts[0] = sampleCounts[0];
         previousCounts[1] = sampleCounts[1];
         lastUs = nowUs;
+        const uint32_t nowMs = millis();
+        if (nowMs - lastPrintedMs >= 100u) {
+            char line[112];
+            const int n = snprintf(line, sizeof(line), "E,%lu,%ld,%ld,%ld,%ld,%lu,%lu,%u,%u\r\n",
+                static_cast<unsigned long>(nowMs),
+                static_cast<long>(static_cast<int32_t>(sampleCounts[0])),
+                static_cast<long>(static_cast<int32_t>(sampleCounts[1])),
+                static_cast<long>(g_encoderProbe.e1Delta),
+                static_cast<long>(g_encoderProbe.e2Delta),
+                static_cast<unsigned long>(sampleInvalid[0]),
+                static_cast<unsigned long>(sampleInvalid[1]),
+                sampleStates[0], sampleStates[1]);
+            if (n > 0 && static_cast<size_t>(n) < sizeof(line)) {
+                debugPort.write(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(n));
+                lastPrintedMs = nowMs;
+            }
+        }
     }
     // 100 ms on, 900 ms off: program heartbeat only, not encoder validation.
     digitalWrite(USER_LED, millis() % 1000u < 100u ? LOW : HIGH);
