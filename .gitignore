@@ -1,0 +1,11 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+test-results/
+*.o
+*.elf
+*.bin
+*.hex
+*.exe
+.doc-review/
