@@ -28,7 +28,9 @@ constexpr bool ROUTE_START_POSE_VERIFIED = false;
 constexpr int ROUTE_TURN_SIGN = 0; // +1 left, -1 right; 0 deliberately locks
 constexpr float ROUTE_SIDE_MM = 1000.0f;
 
-// Optional inner wheel-speed PI/PID. Keep disabled until wheel encoder
+// Optional inner wheel-speed PI/PID, shared by Follow and Route straight legs.
+// Target period is 20 ms; tune gains with actual encoder resolution.
+// Keep disabled until wheel encoder
 // identity, sign, counts/rev, and a safe feedforward PWM are measured.
 constexpr bool SPEED_PID_ENABLED = false;
 constexpr float SPEED_KP = 0.0f;   // PWM per (mm/s)
@@ -36,14 +38,13 @@ constexpr float SPEED_KI = 0.0f;   // PWM per mm
 constexpr float SPEED_KD = 0.0f;
 constexpr float SPEED_FEEDFORWARD_PWM = 0.0f;
 constexpr float SPEED_BASE_MMPS = 0.0f;
-constexpr float SPEED_LINE_CORRECTION_MMPS = 0.0f;
+constexpr float SPEED_LINE_CORRECTION_MMPS = 0.0f; // >0 and <= SPEED_BASE_MMPS when enabled
 
 // Optional gray line-following steering loop (include/LinePid.h). When
 // disabled the Follow/Route states use the original fixed proportional term;
-// when enabled they use LinePid with these gains. Follow with speed PID scales
+// when enabled they use LinePid with these gains. Follow/Route with speed PID scale
 // output / LINE_MAX_CORRECTION by SPEED_LINE_CORRECTION_MMPS into mm/s.
-// Keep disabled until the
-// sensor order and steering gains are tuned on the real track.
+// Keep disabled until sensor order and steering gains are tuned on the real track.
 constexpr bool LINE_PID_ENABLED = false;
 constexpr float LINE_KP = 0.0f;   // steering PWM per unit line error
 constexpr float LINE_KI = 0.0f;   // normally 0: integral can overshoot in turns
@@ -54,7 +55,7 @@ constexpr float LINE_INTEGRAL_LIMIT = 30.0f;
 
 // Parking starts at a marked, measured axle pose beside the bay, not at A.
 // +1: bay on vehicle's right; -1: on its left. Verify against travel direction.
-constexpr int BAY_SIDE = -1; // Printed A->B->C->D layout: interior on vehicle LEFT.
+constexpr int BAY_SIDE = 0; // Unresolved C/D branch direction conflict: +1 right, -1 left; 0 locks parking.
 constexpr bool PARKING_START_POSE_VERIFIED = false;
 constexpr float REVERSE_DEPTH_MM = 0.0f;    // Axle travel AFTER turning away 90 deg
 constexpr float PARALLEL_RADIUS_MM = 0.0f;  // Axle midpoint arc radius > TRACK_MM/2

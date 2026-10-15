@@ -23,3 +23,16 @@
 安装 PlatformIO 后，在对应工程目录运行 `pio run` 编译。各工程配置保留了本机 `D:/car-data/...` 的 core_dir、build_dir 等路径；换电脑使用前需调整为自己的有效路径，Windows 下建议使用纯英文构建路径。
 
 已排除工具链、.pio 编译缓存、测试可执行文件、编辑器本机配置、临时渲染文件和本机迁移脚本。源码及现有文档保留原始内容，PDF 保留原始字节。
+
+## 2026-10-15 C 盘循迹程序更新
+
+按本次指定的 C 盘 `line_follower` 工程完成程序工作，更新位于 [workspace-snapshot/line_follower](workspace-snapshot/line_follower)。上述“本次只归档”描述对应初始归档；本次新增控制代码及验证如下。`development` 仍保留另一套源码，两者未自动合并，测试结论不可互用。
+
+- 完成内外环配合、独立调度与保护，补充泊车/出库任务状态机、视觉帧解析、限量诊断输出和调参工具。
+- 11 项主机测试通过；默认 STM32 固件 Flash 41016 B / RAM 3556 B；隔离启用任务与视觉的验证配置 Flash 44228 B / RAM 3024 B，均编译成功。详见 [验证日志](workspace-snapshot/line_follower/verification/2026-10-15)。
+- 未烧录、未实车验收；完整任务和视觉默认关闭，方向、路径和通信协议需实测确认。隔离测试配置使用模拟标定值，不可烧录上车。
+- [已完成清单](workspace-snapshot/line_follower/docs/01_已完成清单.md)
+- [还需完成清单](workspace-snapshot/line_follower/docs/02_还需完成清单.md)
+- [所需实物数据清单](workspace-snapshot/line_follower/docs/03_所需实物数据清单.md)
+
+根目录接线主表仍为当前实物记录；本次 C 盘的软件配置说明保存在对应快照接线表中，未改变实际接线。

@@ -21,7 +21,7 @@ public:
     }
     void stop() {
         active_ = false;
-        leftTarget_ = rightTarget_ = leftPwm_ = rightPwm_ = 0;
+        leftTarget_ = rightTarget_ = leftPwm_ = rightPwm_ = leftSpeed_ = rightSpeed_ = 0;
         controller_.reset();
     }
     void start(uint32_t now, uint32_t left, uint32_t right, uint32_t errors) {
@@ -36,8 +36,8 @@ public:
         if (right == 0 || rightTarget_ == 0) rightMotionMs_ = now;
         leftTarget_ = left; rightTarget_ = right;
         // Cut output immediately, even between speed samples.
-        if (left == 0) leftPwm_ = 0;
-        if (right == 0) rightPwm_ = 0;
+        if (left == 0) { leftPwm_ = 0; controller_.resetLeft(); }
+        if (right == 0) { rightPwm_ = 0; controller_.resetRight(); }
         return true;
     }
     bool tick(uint32_t now, uint32_t left, uint32_t right, uint32_t errors) {
@@ -55,12 +55,18 @@ public:
         const auto sample = controller_.update(leftTarget_, rightTarget_,
             static_cast<int>(dl), static_cast<int>(dr), elapsed * 0.001f, true);
         if (!sample.valid) return fail();
+        leftSpeed_ = sample.leftSpeed; rightSpeed_ = sample.rightSpeed;
         leftPwm_ = pwm(leftTarget_, sample.leftPwm);
         rightPwm_ = pwm(rightTarget_, sample.rightPwm);
         lastMs_ = now; previousLeft_ = left; previousRight_ = right;
         return true;
     }
+    bool due(uint32_t now) const { return active_ && now - lastMs_ >= periodMs; }
     bool active() const { return active_; }
+    float leftTarget() const { return leftTarget_; }
+    float rightTarget() const { return rightTarget_; }
+    float leftSpeed() const { return leftSpeed_; }
+    float rightSpeed() const { return rightSpeed_; }
     float leftPwm() const { return leftPwm_; }
     float rightPwm() const { return rightPwm_; }
 private:
@@ -78,6 +84,7 @@ private:
     float feedforward_, limit_;
     bool active_ = false;
     float leftTarget_ = 0, rightTarget_ = 0, leftPwm_ = 0, rightPwm_ = 0;
+    float leftSpeed_ = 0, rightSpeed_ = 0;
     uint32_t lastMs_ = 0, leftMotionMs_ = 0, rightMotionMs_ = 0;
     uint32_t previousLeft_ = 0, previousRight_ = 0, initialErrors_ = 0;
 };

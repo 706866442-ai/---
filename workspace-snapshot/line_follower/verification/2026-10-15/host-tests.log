@@ -1,0 +1,11 @@
+PASS: proportional, saturation, integral, derivative, reset, invalid inputs and validity
+parking geometry, feedback faults, completion and wrap tests passed
+PASS: route configuration, B stop, turn/reacquire, loss, marker fault, timeout
+PASS: feedback direction, saturation, anti-windup, stop/reset, invalid inputs, derivative, wheel scaling and simulated convergence
+PASS: zero targets, independent stalls, scheduling, wrap, invalid inputs, route cascade/reset
+PASS: approach/turn/reverse/settle, target A-D, stale gray, vision timeout, single-wheel failure
+PASS: CRC vector, corrupt/truncated/replayed frames, sequence wrap, stale/unknown/confidence
+PASS: bounded telemetry queue, FIFO, overflow accounting, ring wrap
+PASS: real main dispatch, independent speed tick, stall/button stop, full parking, vision exit/target or bounded telemetry
+PASS: real main dispatch, independent speed tick, stall/button stop, full parking, vision exit/target or bounded telemetry
+PASS: packet encoder validation, telemetry parsing, corrupted rows, clock wrap

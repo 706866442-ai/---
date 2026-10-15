@@ -5,6 +5,9 @@
 #include "Route.h"
 #include "LinePid.h"
 #include "SpeedLoop.h"
+#include "MissionConfig.h"
+#include "Telemetry.h"
+#include <cstdio>
 #include "WheelSpeedControl.h"
 
 // C03C STM32F103C8T6 board and the previously assigned TB6612 wiring.
@@ -48,13 +51,23 @@ enum class State : uint8_t {
     Follow,
     Route,
     Parking,
+    Mission,
     Fault
 };
 
-enum class Mode : uint8_t { Follow, FollowAB, FollowLap, ReverseBay, ParallelBay };
+enum class Mode : uint8_t { Follow, FollowAB, FollowLap, ReverseBay, ParallelBay,
+    FullReverse, FullParallel, ExitTarget };
 Mode selectedMode = Mode::Follow;
 parking::Controller parkingController;
 route::Controller routeController;
+mission::Controller missionController;
+vision::Parser visionParser;
+telemetry::Queue<8> telemetryQueue;
+telemetry::Sample latestTelemetry;
+volatile uint32_t lastFaultMs = 0;
+uint32_t lastGraySampleMs = 0;
+volatile uint8_t lastMissionError = 0;
+int16_t lastLineError = 0, commandedLeft = 0, commandedRight = 0;
 drive::WheelSpeedControl speedController(
     {{cfg::SPEED_KP, cfg::SPEED_KI, cfg::SPEED_KD}, cfg::LEFT_MM_PER_COUNT},
     {{cfg::SPEED_KP, cfg::SPEED_KI, cfg::SPEED_KD}, cfg::RIGHT_MM_PER_COUNT});
@@ -118,7 +131,7 @@ volatile uint8_t grayDiagnostics[7] = {1, 0, 0, 0, 0, 0, 0};
 volatile uint32_t grayRecoveryCount = 0;
 volatile uint8_t grayRecoveryFailed = 0;
 
-bool waitBusLevel(pin_size_t pin, uint32_t level) {
+bool waitBusLevel(pin_size_t pin, int level) {
     const uint32_t started = micros();
     while (digitalRead(pin) != level) {
         if (micros() - started >= 1000) return false;
@@ -161,6 +174,7 @@ bool recoverGrayBus() {
 
 void stopMotors()
 {
+    commandedLeft = commandedRight = 0;
     // Disable bridge before touching direction or PWM pins.
     digitalWrite(STBY, LOW);
     analogWrite(PWMA, 0);
@@ -173,6 +187,7 @@ void stopMotors()
 
 void setForward(uint8_t leftPwm, uint8_t rightPwm)
 {
+    commandedLeft = leftPwm; commandedRight = rightPwm;
     digitalWrite(STBY, LOW);
     analogWrite(PWMA, 0);
     analogWrite(PWMB, 0);
@@ -180,18 +195,21 @@ void setForward(uint8_t leftPwm, uint8_t rightPwm)
     digitalWrite(AIN2, A_FORWARD_IN1_HIGH ? LOW : HIGH);
     digitalWrite(BIN1, B_FORWARD_IN1_HIGH ? HIGH : LOW);
     digitalWrite(BIN2, B_FORWARD_IN1_HIGH ? LOW : HIGH);
-    analogWrite(PWMA, leftPwm);
-    analogWrite(PWMB, rightPwm);
+    analogWrite(PWMA, cfg::A_IS_RIGHT ? rightPwm : leftPwm);
+    analogWrite(PWMB, cfg::A_IS_RIGHT ? leftPwm : rightPwm);
     digitalWrite(STBY, HIGH);
 }
 
 void updateForwardPwm(uint8_t leftPwm, uint8_t rightPwm)
 {
+    commandedLeft = leftPwm; commandedRight = rightPwm;
     analogWrite(PWMA, cfg::A_IS_RIGHT ? rightPwm : leftPwm);
     analogWrite(PWMB, cfg::A_IS_RIGHT ? leftPwm : rightPwm);
 }
 
 void setWheels(int left, int right) {
+    commandedLeft = constrain(left, -MAX_PWM, MAX_PWM);
+    commandedRight = constrain(right, -MAX_PWM, MAX_PWM);
     const int a = constrain(cfg::A_IS_RIGHT ? right : left, -MAX_PWM, MAX_PWM);
     const int b = constrain(cfg::A_IS_RIGHT ? left : right, -MAX_PWM, MAX_PWM);
     if (a == 0 && b == 0) { stopMotors(); return; }
@@ -224,6 +242,7 @@ bool readGrayCommand(uint8_t address, uint8_t command, uint8_t &value)
     }
     value = static_cast<uint8_t>(grayBus.read());
     if (command == GRAY_DIGITAL) {
+        lastGraySampleMs = millis();
         grayDiagnostics[3] = value;
         grayDiagnostics[4] = 1;
     }
@@ -262,7 +281,7 @@ bool lineErrorFromDigital(uint8_t digital, int16_t &error)
     if (blackCount == 0 || blackCount == 8) {
         return false;
     }
-    error = static_cast<int16_t>(weighted / blackCount); // -3500..3500.
+    error = lastLineError = static_cast<int16_t>(weighted / blackCount); // -3500..3500.
     return true;
 }
 
@@ -271,6 +290,7 @@ void enterState(State next, uint32_t now)
     stopMotors();
     parkingController.stop();
     routeController.stop();
+    missionController.stop();
     speedLoop.stop();
     linePid.reset();
     state = next;
@@ -280,9 +300,11 @@ void enterState(State next, uint32_t now)
 
 void fault(const char *message, uint32_t now, FaultCode code = FaultCode::Parking)
 {
+    lastFaultMs = now;
+    lastMissionError = static_cast<uint8_t>(missionController.error());
     enterState(State::Fault, now);
     grayDiagnostics[1] = static_cast<uint8_t>(code);
-    debugPort.println(message);
+    if (!taskcfg::VISION_UART_ENABLED) debugPort.println(message);
 }
 
 // Preserve modulo count arithmetic across encoder wrap and reversed signs.
@@ -326,7 +348,8 @@ bool setSpeedTargets(float correction, uint32_t now, float scale = 1.0f) {
 // Called on every loop pass, independent of the 40 ms gray sampling gate.
 void serviceSpeed(uint32_t now) {
     if (!cfg::SPEED_PID_ENABLED || !speedLoop.active()) return;
-    if (state != State::Follow && state != State::Route) { speedLoop.stop(); return; }
+    if (state != State::Follow && state != State::Route && state != State::Mission) { speedLoop.stop(); return; }
+    if (!speedLoop.due(now)) return;
     uint32_t left, right, errors; speedSnapshot(left, right, errors);
     if (!speedLoop.tick(now, left, right, errors)) {
         fault("STOP: speed feedback/period fault", now); return;
@@ -334,17 +357,18 @@ void serviceSpeed(uint32_t now) {
     setWheels(static_cast<int>(speedLoop.leftPwm()), static_cast<int>(speedLoop.rightPwm()));
 }
 
-bool applyLine(int16_t error, float dt, uint32_t now) {
+bool applyLine(int16_t error, float dt, uint32_t now, float scale = 1.0f) {
     const float steering = cfg::LINE_PID_ENABLED ? linePid.update(error, dt)
         : static_cast<float>(error) * MAX_CORRECTION / 3500.0f;
     if (cfg::SPEED_PID_ENABLED) {
         const float normalized = cfg::LINE_PID_ENABLED ? steering / cfg::LINE_MAX_CORRECTION
             : error / 3500.0f;
-        return setSpeedTargets(cfg::SPEED_LINE_CORRECTION_MMPS * normalized, now);
+        return setSpeedTargets(cfg::SPEED_LINE_CORRECTION_MMPS * normalized * scale, now, scale);
     }
-    const int correction = static_cast<int>(steering);
-    setWheels(constrain(BASE_PWM + correction, 0, MAX_PWM),
-              constrain(BASE_PWM - correction, 0, MAX_PWM));
+    const int correction = static_cast<int>(steering * scale);
+    const int base = static_cast<int>(BASE_PWM * scale);
+    setWheels(constrain(base + correction, 0, MAX_PWM),
+              constrain(base - correction, 0, MAX_PWM));
     return true;
 }
 
@@ -382,12 +406,12 @@ void startParking(uint32_t now) {
         fault("STOP: invalid parking geometry", now); return;
     }
     state = State::Parking; stateSinceMs = now; lastControlMs = now;
-    debugPort.println("PARKING: encoder motion from calibrated starting pose");
+    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("PARKING: encoder motion from calibrated starting pose");
 }
 
 void startRoute(uint32_t now) {
     if (!controlConfigurationValid()) {
-        fault("STOP: invalid line PID configuration", now, FaultCode::Configuration); return;
+        fault("STOP: invalid control configuration/calibration", now, FaultCode::Configuration); return;
     }
     linePid.reset();
     if (!cfg::MOTOR_DIRECTIONS_VERIFIED || !cfg::SENSOR_ORDER_VERIFIED ||
@@ -414,6 +438,7 @@ void startRoute(uint32_t now) {
     config.wheelTrackMm = cfg::TRACK_MM;
     config.turnSign = cfg::ROUTE_TURN_SIGN;
     config.maxTaskMs = selectedMode == Mode::FollowAB ? 10000 : 30000;
+    now = millis();
     if (!routeController.start(selectedMode == Mode::FollowAB
             ? route::Task::AB : route::Task::Lap, config, now, left, right)) {
         fault("STOP: invalid route geometry", now, FaultCode::Configuration);
@@ -424,7 +449,97 @@ void startRoute(uint32_t now) {
     state = State::Route;
     stateSinceMs = now;
     lastControlMs = now - CONTROL_PERIOD_MS;
-    debugPort.println("ROUTE: AB or four legs, watch for corner marks");
+    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("ROUTE: AB or four legs, watch for corner marks");
+}
+
+void startMission(uint32_t now) {
+    if (!taskcfg::COMPLETE_MISSIONS_ENABLED || !controlConfigurationValid() ||
+        !cfg::MOTOR_DIRECTIONS_VERIFIED || !cfg::SENSOR_ORDER_VERIFIED ||
+        !cfg::ENCODER_INPUTS_ENABLED || !cfg::ENCODERS_VERIFIED ||
+        !parking::positive(cfg::LEFT_MM_PER_COUNT) || !parking::positive(cfg::RIGHT_MM_PER_COUNT) ||
+        (cfg::E1_FORWARD_SIGN != 1 && cfg::E1_FORWARD_SIGN != -1) ||
+        (cfg::E2_FORWARD_SIGN != 1 && cfg::E2_FORWARD_SIGN != -1)) {
+        fault("STOP: mission configuration not verified", now, FaultCode::Configuration); return;
+    }
+    mission::Plan plan;
+    const bool valid = selectedMode == Mode::ExitTarget ? taskcfg::buildExit(plan)
+        : taskcfg::buildParking(plan, selectedMode == Mode::FullParallel,
+            selectedMode == Mode::FullParallel ? taskcfg::PARALLEL_APPROACH : taskcfg::REVERSE_APPROACH);
+    if (!valid) { fault("STOP: mission path not measured", now, FaultCode::Configuration); return; }
+    stopMotors(); speedLoop.stop(); linePid.reset();
+    grayAddress = findGrayBoard();
+    if (!grayAddress) { fault("STOP: mission gray sensor missing", millis(), FaultCode::SensorMissing); return; }
+    mission::Input input; input.now = millis();
+    wheelDistances(input.leftMm, input.rightMm, parkingInitialErrors);
+    mission::Config config;
+    config.route.sideMm = cfg::ROUTE_SIDE_MM; config.route.wheelTrackMm = cfg::TRACK_MM;
+    config.route.turnSign = cfg::ROUTE_TURN_SIGN;
+    if (selectedMode == Mode::ExitTarget) {
+        config.nextPoint = taskcfg::EXIT_NEXT_POINT; config.pointStep = taskcfg::EXIT_POINT_STEP;
+    }
+    // Discard pre-start UART data: recognition must be fresh for this mission.
+    for (int i = 0; taskcfg::VISION_UART_ENABLED && i < 256 && debugPort.available(); ++i) debugPort.read();
+    visionParser.reset();
+    if (!missionController.start(plan, config, input)) {
+        fault("STOP: mission plan invalid", input.now, FaultCode::Configuration); return;
+    }
+    state = State::Mission; stateSinceMs = lastControlMs = input.now;
+    lastMissionError = 0;
+}
+
+void pollVision(uint32_t now) {
+    if (!taskcfg::VISION_UART_ENABLED) return;
+    for (int i = 0; i < 16 && debugPort.available(); ++i) {
+        vision::Frame frame;
+        if (visionParser.feed(static_cast<uint8_t>(debugPort.read()), now, frame))
+            missionController.receive(frame, now);
+    }
+}
+
+int16_t telemetryValue(float value) {
+    if (!std::isfinite(value)) return 0;
+    return static_cast<int16_t>(constrain(value, -32768.0f, 32767.0f));
+}
+void serviceTelemetry(uint32_t now) {
+    static uint32_t last = 0;
+    static char text[192];
+    static size_t length = 0, sent = 0;
+    if (now - last >= 100) {
+        last = now;
+        telemetry::Sample sample;
+        sample.ms = now; sample.state = static_cast<uint8_t>(state);
+        sample.mode = static_cast<uint8_t>(selectedMode); sample.phase = missionController.phase();
+        sample.gray = grayDiagnostics[3]; sample.grayAgeMs = now - lastGraySampleMs;
+        sample.grayValid = grayDiagnostics[4] && sample.grayAgeMs <= 150;
+        sample.speedValid = speedLoop.active(); sample.fault = grayDiagnostics[1];
+        encoderSnapshot(sample.e1, sample.e2, sample.errors);
+        sample.lineError = lastLineError;
+        sample.leftTarget = telemetryValue(speedLoop.leftTarget()); sample.rightTarget = telemetryValue(speedLoop.rightTarget());
+        sample.leftSpeed = telemetryValue(speedLoop.leftSpeed()); sample.rightSpeed = telemetryValue(speedLoop.rightSpeed());
+        sample.leftPwm = commandedLeft; sample.rightPwm = commandedRight;
+        latestTelemetry = sample; // Always inspectable via SWD, including vision UART mode.
+        if (!taskcfg::VISION_UART_ENABLED) telemetryQueue.push(sample);
+    }
+    if (taskcfg::VISION_UART_ENABLED) return; // Camera RX must not receive diagnostic text.
+    if (sent == length) {
+        telemetry::Sample s;
+        if (!telemetryQueue.pop(s)) return;
+        const int n = snprintf(text, sizeof(text),
+            "T,%lu,%u,%u,%u,%u,%u,%d,%ld,%ld,%lu,%d,%d,%d,%d,%d,%d,%u,%lu,%lu,%u\n",
+            static_cast<unsigned long>(s.ms), s.state, s.mode, s.phase, s.gray, s.grayValid,
+            s.lineError, static_cast<long>(s.e1), static_cast<long>(s.e2), static_cast<unsigned long>(s.errors),
+            s.leftTarget, s.rightTarget, s.leftSpeed, s.rightSpeed, s.leftPwm, s.rightPwm, s.fault,
+            static_cast<unsigned long>(telemetryQueue.dropped),
+            static_cast<unsigned long>(s.grayAgeMs), s.speedValid);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(text)) { length = sent = 0; return; }
+        length = static_cast<size_t>(n); sent = 0;
+    }
+    const int room = debugPort.availableForWrite();
+    if (room <= 0) return;
+    size_t n = length - sent;
+    if (n > 16) n = 16;
+    if (n > static_cast<size_t>(room)) n = static_cast<size_t>(room);
+    sent += debugPort.write(reinterpret_cast<const uint8_t *>(text + sent), n);
 }
 
 void showStatus(uint32_t now)
@@ -433,7 +548,7 @@ void showStatus(uint32_t now)
     switch (state) {
         case State::Ready:
         case State::WaitForRelease:
-            // One/two/three pulses per 2s indicate follow/reverse/parallel mode.
+            // One to eight pulses per 2s identify modes 0..7.
             on = (now % 2000UL) / 200UL <= static_cast<uint8_t>(selectedMode) &&
                  (now % 200UL) < 60UL;
             break;
@@ -446,6 +561,7 @@ void showStatus(uint32_t now)
         case State::Follow:
         case State::Route:
         case State::Parking:
+        case State::Mission:
             on = (now % 250UL) < 40UL;
             break;
         case State::Fault:
@@ -491,7 +607,7 @@ void setup()
         attachInterrupt(digitalPinToInterrupt(PB15), encoder2Changed, CHANGE);
         attachInterrupt(digitalPinToInterrupt(PA8), encoder2Changed, CHANGE);
     }
-    debugPort.println("LINE FOLLOWER READY: release button first");
+    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("LINE FOLLOWER READY: release button first");
     // Read-only startup check; motor outputs remain stopped throughout.
     grayAddress = findGrayBoard();
     grayDiagnostics[2] = grayAddress;
@@ -505,20 +621,11 @@ void loop()
 {
     const uint32_t now = millis();
     const bool pressed = buttonPressed(now);
-    if ((state == State::Follow || state == State::Route) && digitalRead(KEY) == LOW) {
+    if ((state == State::Follow || state == State::Route || state == State::Mission) && digitalRead(KEY) == LOW) {
         enterState(State::WaitForRelease, now);
     }
     serviceSpeed(now);
-    static uint32_t lastDiagnosticMs = 0;
-    if (cfg::ENCODER_INPUTS_ENABLED && state != State::Follow &&
-        state != State::Route && state != State::Parking && now - lastDiagnosticMs >= 500) {
-        lastDiagnosticMs = now;
-        int32_t e1, e2; uint32_t errors; encoderSnapshot(e1, e2, errors);
-        debugPort.print("E1="); debugPort.print(e1);
-        debugPort.print(" E2="); debugPort.print(e2);
-        debugPort.print(" invalid="); debugPort.println(errors);
-    }
-
+    pollVision(now);
     switch (state) {
         case State::WaitForRelease:
             if (pressed) {
@@ -527,7 +634,7 @@ void loop()
                 releasedSinceMs = now;
             } else if (now - releasedSinceMs >= 500) {
                 state = State::Ready;
-                debugPort.println("READY: tap=mode, 1s=wheel test, >=2s=selected mode");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("READY: tap=mode, 1s=wheel test, >=2s=selected mode");
             }
             break;
 
@@ -545,6 +652,8 @@ void loop()
                     grayDiagnostics[1] = 0;
                     grayDiagnostics[2] = 0;
                     grayDiagnostics[4] = 0;
+                    if (selectedMode == Mode::FullReverse || selectedMode == Mode::FullParallel ||
+                        selectedMode == Mode::ExitTarget) { startMission(now); break; }
                     if (selectedMode == Mode::ReverseBay ||
                         selectedMode == Mode::ParallelBay) {
                         startParking(now); break;
@@ -573,18 +682,18 @@ void loop()
                         speedLoop.stop();
                         linePid.reset();
                         applyLine(error, CONTROL_PERIOD_MS * 0.001f, started);
-                        debugPort.println("FOLLOW: max 10 s, press button to stop");
+                        if (!taskcfg::VISION_UART_ENABLED) debugPort.println("FOLLOW: max 10 s, press button to stop");
                     }
                 } else if (heldMs >= 500) {
                     setForward(TEST_PWM, 0);
                     state = State::TestA;
                     stateSinceMs = now;
-                    debugPort.println("TEST: channel A forward");
+                    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("TEST: channel A forward");
                 } else {
                     if (heldMs >= 60) {
-                        selectedMode = static_cast<Mode>((static_cast<uint8_t>(selectedMode) + 1) % 5);
-                        debugPort.print("MODE (0=test 1=AB 2=lap 3=reverse 4=parallel): ");
-                        debugPort.println(static_cast<uint8_t>(selectedMode));
+                        selectedMode = static_cast<Mode>((static_cast<uint8_t>(selectedMode) + 1) % 8);
+                        if (!taskcfg::VISION_UART_ENABLED) debugPort.print("MODE 0=follow 1=AB 2=lap 3/4=park 5/6=full-park 7=exit-target: ");
+                        if (!taskcfg::VISION_UART_ENABLED) debugPort.println(static_cast<uint8_t>(selectedMode));
                     }
                     state = State::Ready;
                 }
@@ -606,25 +715,28 @@ void loop()
                 setForward(0, TEST_PWM);
                 state = State::TestB;
                 stateSinceMs = now;
-                debugPort.println("TEST: channel B forward");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("TEST: channel B forward");
             }
             break;
 
         case State::TestB:
             if (pressed || now - stateSinceMs >= 400) {
                 enterState(State::WaitForRelease, now);
-                debugPort.println("TEST: finished, motors stopped");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("TEST: finished, motors stopped");
             }
             break;
 
         case State::Follow:
             if (now - stateSinceMs >= MAX_RUN_MS) {
                 enterState(State::WaitForRelease, now);
-                debugPort.println("STOP: 10 s limit");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("STOP: 10 s limit");
             } else if (now - lastControlMs >= CONTROL_PERIOD_MS) {
                 int16_t error = 0;
                 if (!readLineOrFault(error, now)) break;
                 const uint32_t sampled = millis();
+                if (digitalRead(KEY) == LOW) {
+                    enterState(State::WaitForRelease, sampled); break;
+                }
                 const float dt = (sampled - lastControlMs) * 0.001f;
                 if (dt > 0.15f || sampled - stateSinceMs >= MAX_RUN_MS) {
                     fault("STOP: stale line sample/task timeout", sampled); break;
@@ -639,7 +751,7 @@ void loop()
             // only for selecting/starting a mode while stationary.
             if (digitalRead(KEY) == LOW) {
                 enterState(State::WaitForRelease, now);
-                debugPort.println("STOP: route cancelled");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("STOP: route cancelled");
             } else if (now - lastControlMs >= CONTROL_PERIOD_MS) {
                 uint8_t digital = 0;
                 if (!readGrayCommand(grayAddress, GRAY_DIGITAL, digital)) {
@@ -647,6 +759,9 @@ void loop()
                     break;
                 }
                 const uint32_t sampled = millis();
+                if (digitalRead(KEY) == LOW) {
+                    enterState(State::WaitForRelease, sampled); break;
+                }
                 const float lineDt = (sampled - lastControlMs) * 0.001f;
                 if (lineDt > 0.15f) { fault("STOP: stale route sample", sampled); break; }
                 lastControlMs = sampled;
@@ -659,7 +774,7 @@ void loop()
                 const route::Result output = routeController.update(digital, sampled, left, right);
                 if (output.status == route::Status::Complete) {
                     enterState(State::WaitForRelease, now);
-                    debugPort.println("ROUTE: reached endpoint, motors stopped");
+                    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("ROUTE: reached endpoint, motors stopped");
                 } else if (output.status == route::Status::Fault) {
                     fault("STOP: route lost marker/line or timed out", now);
                 } else if (output.status == route::Status::Turn) {
@@ -677,7 +792,7 @@ void loop()
                         fault("STOP: route line position invalid", now);
                         break;
                     }
-                    applyLine(error, lineDt, sampled);
+                    applyLine(error, lineDt, sampled, output.approachingPoint ? 0.6f : 1.0f);
                 }
             }
             break;
@@ -686,7 +801,7 @@ void loop()
             // React to raw press immediately for stop; start uses debounced input.
             if (digitalRead(KEY) == LOW) {
                 enterState(State::WaitForRelease, now);
-                debugPort.println("STOP: parking cancelled");
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("STOP: parking cancelled");
             } else if (now - lastControlMs >= 20) {
                 lastControlMs = now;
                 float left, right; uint32_t errors; wheelDistances(left, right, errors);
@@ -697,13 +812,55 @@ void loop()
                 const parking::Status status = parkingController.status;
                 if (status == parking::Status::Complete) {
                     enterState(State::WaitForRelease, now);
-                    debugPort.println("PARKING: distance sequence finished; inspect actual pose");
+                    if (!taskcfg::VISION_UART_ENABLED) debugPort.println("PARKING: distance sequence finished; inspect actual pose");
                 } else if (status != parking::Status::Running) {
-                    debugPort.print("PARKING fault code: "); debugPort.println(static_cast<int>(status));
+                    if (!taskcfg::VISION_UART_ENABLED) debugPort.print("PARKING fault code: "); if (!taskcfg::VISION_UART_ENABLED) debugPort.println(static_cast<int>(status));
                     fault("STOP: parking feedback/timeout fault", now);
                 } else setWheels(output.left, output.right);
             }
             break;
+
+        case State::Mission: {
+            mission::Input input;
+            uint32_t errors;
+            wheelDistances(input.leftMm, input.rightMm, errors);
+            if (errors - parkingInitialErrors > 8) { fault("STOP: mission encoder invalid", now); break; }
+            if (missionController.needsGray() && now - lastControlMs >= CONTROL_PERIOD_MS) {
+                if (!readGrayCommand(grayAddress, GRAY_DIGITAL, input.digital)) {
+                    fault("STOP: mission gray read failed", millis(), FaultCode::ReadFailed); break;
+                }
+                input.grayFresh = true;
+            }
+            input.now = millis();
+            if (digitalRead(KEY) == LOW) { enterState(State::WaitForRelease, input.now); break; }
+            const float dt = (input.now - lastControlMs) * 0.001f;
+            if (input.grayFresh) lastControlMs = input.now;
+            const auto output = missionController.update(input);
+            if (missionController.status() == mission::Status::Complete) {
+                enterState(State::WaitForRelease, input.now);
+                if (!taskcfg::VISION_UART_ENABLED) debugPort.println("MISSION: completed, inspect final pose"); break;
+            }
+            if (missionController.status() == mission::Status::Fault) {
+                fault("STOP: mission sensor/motion/timeout fault", input.now); break;
+            }
+            if (output.command == mission::Command::Stop) {
+                speedLoop.stop(); linePid.reset(); stopMotors(); lastControlMs = input.now;
+            } else if (output.command == mission::Command::Pwm) {
+                speedLoop.stop(); linePid.reset();
+                setWheels(output.leftPwm, output.rightPwm);
+            } else if (output.command == mission::Command::Follow) {
+                if (input.digital == 0) {
+                    linePid.reset();
+                    if (cfg::SPEED_PID_ENABLED) setSpeedTargets(0, input.now, output.scale);
+                    else setWheels(static_cast<int>(BASE_PWM * output.scale), static_cast<int>(BASE_PWM * output.scale));
+                } else {
+                    int16_t error = 0;
+                    if (!lineErrorFromDigital(input.digital, error)) { fault("STOP: mission line invalid", input.now); break; }
+                    applyLine(error, dt, input.now, output.scale);
+                }
+            }
+            break;
+        }
 
         case State::Fault:
             if (pressed) {
@@ -713,8 +870,9 @@ void loop()
     }
 
     const uint32_t finished = millis();
-    if ((state == State::Follow || state == State::Route) && digitalRead(KEY) == LOW)
+    if ((state == State::Follow || state == State::Route || state == State::Mission) && digitalRead(KEY) == LOW)
         enterState(State::WaitForRelease, finished);
     serviceSpeed(finished);
+    serviceTelemetry(finished);
     showStatus(finished);
 }

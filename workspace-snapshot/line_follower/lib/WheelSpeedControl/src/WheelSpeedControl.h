@@ -58,6 +58,8 @@ public:
                          int rightCountDelta, float dtSeconds, bool enabled);
     void reset();
     bool valid() const;
+    void resetLeft() { left_.reset(); }
+    void resetRight() { right_.reset(); }
 
 private:
     WheelConfig leftConfig_;

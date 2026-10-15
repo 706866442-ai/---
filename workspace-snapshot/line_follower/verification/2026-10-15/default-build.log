@@ -1,0 +1,28 @@
+Processing bluepill_f103c8 (platform: ststm32; board: bluepill_f103c8; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/ststm32/bluepill_f103c8.html
+PLATFORM: ST STM32 (20.0.0) > BluePill F103C8
+HARDWARE: STM32F103C8T6 72MHz, 20KB RAM, 64KB Flash
+DEBUG: Current (stlink) External (blackmagic, cmsis-dap, jlink, stlink)
+PACKAGES: 
+ - framework-arduinoststm32 @ 4.30000.0 (3.0.0) 
+ - framework-cmsis @ 2.60300.0 (6.3.0) 
+ - framework-cmsis-dsp @ 1.16.2 
+ - toolchain-gccarmnoneeabi @ 1.120301.0 (12.3.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 16 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- WheelSpeedControl
+|-- Wire @ 1.0.0
+Building in release mode
+Compiling D:\CodexWorkspace\scratch\line-follower-completion-20261015\build-default\bluepill_f103c8\src\main.cpp.o
+Linking D:\CodexWorkspace\scratch\line-follower-completion-20261015\build-default\bluepill_f103c8\firmware.elf
+Checking size D:\CodexWorkspace\scratch\line-follower-completion-20261015\build-default\bluepill_f103c8\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  17.4% (used 3556 bytes from 20480 bytes)
+Flash: [======    ]  62.6% (used 41016 bytes from 65536 bytes)
+Building D:\CodexWorkspace\scratch\line-follower-completion-20261015\build-default\bluepill_f103c8\firmware.bin
+========================= [SUCCESS] Took 5.60 seconds =========================
