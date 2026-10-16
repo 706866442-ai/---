@@ -40,3 +40,7 @@
 ## 编码器双路原始计数显示
 
 C 盘快照中的 `gray_i2c_probe/encoder_probe` 已增加 PA2 串口输出：每 100 ms 提供 E1/E2 累计计数、增量、无效跳变及 A/B 电平。此探针已编译，尚未烧录；须先核对编码器供电和 3.3 V 逻辑电平。详情见 [探针说明](workspace-snapshot/gray_i2c_probe/编码器测试说明.md)。
+
+## 2026-10-16 编码器探针烧录
+
+`workspace-snapshot/gray_i2c_probe` 的 `encoder_probe` 已通过 ST-LINK 烧录并返回 `Verified OK`。初始 ST-LINK 回读 E1/E2=0/0，采样时车轮未转，不能据此判定编码器是否有效；详情见 [烧录与初始回读记录](workspace-snapshot/gray_i2c_probe/diagnostics/2026-10-16-encoder-probe-flash.md)。
